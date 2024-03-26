@@ -12,13 +12,14 @@ message VoteResponse {
   bool vote_granted = 3;
 }
 
-message LogItem {
-  int32 term = 1;
-  int32 index = 2;
-  string command = 3;
-}
-
 message LogRequest{
+  message LogItem {
+    string command = 1;
+    string key = 2;
+    string value = 3;
+    int32 term = 4;
+  }
+  
   int32 leader_id = 1;
   int32 term = 2;
   int32 prefixLen = 3;
@@ -34,25 +35,30 @@ message LogResponse{
   bool success = 4;
 }
 
-// message ServeClientArgs {
-//   string request = 1;
-// }
+//Client operations
+message SetValRequest {
+  string key = 1;
+  string value = 2;
+}
 
-// message ServeClientReply {
-//   string data = 1;
-//   int32 leader_id = 2;
-//   bool success = 3;
-// }
+message SetValResponse {
+  bool success = 1;
+  int32 current_leader = 2;
+}
 
-// message SendMessageRequest {
-//     string message = 1;
-// }
-// message SendMessageResponse {
-//     string reply = 1;
-// }
+message GetValRequest {
+  string key = 1;
+}
+
+message GetValResponse {
+  string value = 1;
+  bool success = 2;
+  int32 current_leader = 3;
+}
 
 service Node {
   rpc Log(LogRequest) returns (LogResponse);
   rpc Vote(VoteRequest) returns (VoteResponse);
-  // rpc ServeClient(ServeClientArgs) returns (ServeClientReply);
+  rpc SetVal(SetValRequest) returns (SetValResponse);
+  rpc GetVal(GetValRequest) returns (GetValResponse);
 }
