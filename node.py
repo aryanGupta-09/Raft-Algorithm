@@ -5,7 +5,6 @@ import node_pb2_grpc
 import grpc
 import threading
 import os
-
 from collections import defaultdict
 from concurrent import futures
 
@@ -31,6 +30,20 @@ def generate_election_timeout():
 def reset_election_timeout():
     election_timer_event.set()
 
+def dump_state(message):
+    global node_id
+    
+    print(f"dump_state called with node_id: {node_id}")
+    directory = f'logs_node_{node_id}'
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    
+    try:
+        with open(f'{directory}/dump.txt', 'a') as f:
+            f.write(f'{message}\n')
+    except Exception as e:
+        print(f"An error occurred while dumping the state")
+
 def save_state(node_id):
     global logs, commit_length, voted_for, current_term
 
@@ -46,13 +59,14 @@ def save_state(node_id):
         
         with open(f'{directory}/metadata.txt', 'w') as f:
             f.write(f'Commit Length: {commit_length}, Term: {current_term}, Voted for: {voted_for}\n')
-    
+
     except Exception as e:
         print(f"An error occurred while saving the state")
 
 def load_state(node_id):
     global logs, commit_length, voted_for, current_term
 
+    print(f"load_state called with node_id: {node_id}")
     directory = f'logs_node_{node_id}'
     if not os.path.exists(directory):
         print(f"Directory {directory} does not exist.")
@@ -105,6 +119,7 @@ class NodeClient:
     def start_election(self):
         global current_leader, current_role, voted_for, current_term, node_id, logs
 
+        dump_state(f"Node {node_id} election timer timed out, Starting election.")
         current_term += 1
         current_role = 'candidate'
         voted_for = node_id
@@ -146,7 +161,8 @@ class NodeClient:
 
             if len(self.votes_received) >= (len(self.server_adds) + 1) // 2:
                 current_role = 'leader'
-                print("collect_vote 2:", current_role)
+                dump_state(f"Node {node_id} became the leader for term {current_term}")
+                print(f"collect_vote 2: Node {node_id} became the leader for ", current_role)
                 current_leader = node_id
                 reset_election_timeout()
                 for follower_id in self.server_adds.keys():
@@ -179,6 +195,8 @@ class NodeClient:
             # wait for all threads to complete
             for thread in threads:
                 thread.join()
+        else:
+            dump_state(f"{node_id} Stepping down")
     
     def replicate_log(self, follower_id):
         global logs, node_id, current_term, commit_length
@@ -202,6 +220,7 @@ class NodeClient:
             self.process_log_response(follower_id, response.term, response.ack, response.success)
 
         except grpc.RpcError as e:
+            dump_state(f"Error occurred while sending RPC to Node {follower_id}.")
             print(f"Failed to connect to node {follower_id}")
 
     def process_log_response(self, follower, term, ack, success):
@@ -238,6 +257,7 @@ class NodeClient:
         if ready and ready[-1] >= commit_length and logs[ready[-1]].term == current_term:
             for i in range(commit_length, ready[-1] + 1):
                 print(logs[i], end=' ')
+                dump_state(f"Node {node_id} (leader) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
             commit_length = ready[-1] + 1
             print("commitlength 2-",commit_length)
             save_state(node_id)
@@ -257,15 +277,17 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         last_log_term = 0 if not logs else logs[-1].term
         log_ok = request.last_term > last_log_term or (request.last_term == last_log_term and request.log_length >= len(logs))
         vote_granted = False
-        print("Vote 1: request.term, current_term, log_ok voted_for, request.candidate_id", request.term, current_term, log_ok, voted_for, request.candidate_id)
+        print(f"Vote 1: term: {request.term}, current_term: {current_term}, voted_for: {voted_for}, candidate_id: {request.candidate_id}")
         
         if request.term == current_term and log_ok and (voted_for is None or voted_for == request.candidate_id):
             voted_for = request.candidate_id
             vote_granted = True
+        
+        dump_state(f"Vote {'granted' if vote_granted else 'denied'} for Node {request.candidate_id} in term {current_term}")
         return node_pb2.VoteResponse(voter_id=node_id, term=current_term, vote_granted=vote_granted)
     
     def append_entries(self, prefix_len, leader_commit, suffix):
-        global logs, commit_length
+        global logs, commit_length, current_leader
 
         print("append_entries")
         if len(suffix) > 0 and len(logs) > prefix_len:
@@ -275,12 +297,13 @@ class NodeServer(node_pb2_grpc.NodeServicer):
 
         if prefix_len + len(suffix) > len(logs):
             logs += suffix
+            dump_state(f"Node {node_id} accepted AppendEntries RPC from {current_leader}.")
         
         if leader_commit > commit_length:
-            for i in range(commit_length, leader_commit-1):
+            for i in range(commit_length, leader_commit):
                 print(logs[i], end = " ")
+                dump_state(f"Node {node_id} (leader) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
             commit_length = leader_commit
-
         save_state(node_id)
             
     def Log(self, request, context):
@@ -303,6 +326,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
                 return node_pb2.LogResponse(node_id = node_id, term = current_term, ack = ack, success = True)
             
             else:
+                dump_state(f"Node {node_id} rejected AppendEntries RPC from {current_leader}.")
                 return node_pb2.LogResponse(node_id = node_id, term = current_term, ack = 0, success = False)
 
     def SetVal(self, request, context):
@@ -314,6 +338,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         key = request.key
         value = request.value
         newLog = node_pb2.LogRequest.LogItem(command = "SET", key = key, value = value, term = current_term)
+        dump_state(f"Node {node_id} (leader) received an SET request.")
         logs.append(newLog)
         index = len(logs)  # Index of the new log entry
         print(logs)
@@ -345,6 +370,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         
         key = request.key
         value = None
+        # dump_state(f"Node {node_id} (leader) received an GET request.")
 
         for entry in reversed(self.logs):
             if entry['key'] == key:
