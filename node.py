@@ -344,20 +344,13 @@ class NodeServer(node_pb2_grpc.NodeServicer):
             return node_pb2.GetValResponse(value=None, success=success, current_leader = current_leader)
         
         key = request.key
-        value = ""
-        directory = f'logs_node_{node_id}'
+        value = None
 
-        try:
-            with open(f'{directory}/logs.txt', 'r') as f:
-                for line in reversed(f.readlines()):
-                    log = line.strip().split()
-                    if len(log) >= 3 and log[1] == key:
-                        value = log[2]
-                        success = True
-                        break
-
-        except FileNotFoundError:
-            print("Log file not found.")
+        for entry in reversed(self.logs):
+            if entry['key'] == key:
+                value = entry['value']
+                success = True
+                break
 
         return node_pb2.GetValResponse(value=value, success=success, current_leader = current_leader)
     
