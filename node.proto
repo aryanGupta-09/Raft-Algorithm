@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+message VoteRequest {
+  int32 candidate_id = 1;
+  int32 term = 2;
+  int32 log_length = 3;
+  int32 last_term = 4;
+}
+message VoteResponse {
+  int32 voter_id = 1;
+  int32 term = 2;
+  bool vote_granted = 3;
+}
+
+message LogItem {
+  int32 term = 1;
+  int32 index = 2;
+  string command = 3;
+}
+
+message LogRequest{
+  int32 leader_id = 1;
+  int32 term = 2;
+  int32 prefixLen = 3;
+  int32 prefixTerm = 4;
+  int32 leaderCommit = 5;
+  repeated LogItem suffix = 6;
+  int32 follower_id = 7;
+}
+message LogResponse{
+  int32 node_id = 1;
+  int32 term = 2;
+  int32 ack = 3;
+  bool success = 4;
+}
+
+// message ServeClientArgs {
+//   string request = 1;
+// }
+
+// message ServeClientReply {
+//   string data = 1;
+//   int32 leader_id = 2;
+//   bool success = 3;
+// }
+
+// message SendMessageRequest {
+//     string message = 1;
+// }
+// message SendMessageResponse {
+//     string reply = 1;
+// }
+
+service Node {
+  rpc Log(LogRequest) returns (LogResponse);
+  rpc Vote(VoteRequest) returns (VoteResponse);
+  // rpc ServeClient(ServeClientArgs) returns (ServeClientReply);
+}
