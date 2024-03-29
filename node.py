@@ -338,7 +338,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         key = request.key
         value = request.value
         newLog = node_pb2.LogRequest.LogItem(command = "SET", key = key, value = value, term = current_term)
-        dump_state(f"Node {node_id} (leader) received an SET request.")
+        dump_state(f"Node {node_id} (leader) received a SET request.")
         logs.append(newLog)
         index = len(logs)  # Index of the new log entry
         print(logs)
@@ -357,12 +357,12 @@ class NodeServer(node_pb2_grpc.NodeServicer):
                 return node_pb2.SetValResponse(success=False, current_leader = current_leader)
             time.sleep(1)
             attempt += 1
-
-        print(f"Set {key} = {value}")            
-        return node_pb2.SetValResponse(success=True, current_leader = current_leader)
+        else:
+            print(f"Set {key} = {value}")            
+            return node_pb2.SetValResponse(success=True, current_leader = current_leader)
     
     def GetVal(self, request, context):
-        global node_id, current_role, current_leader
+        global node_id, current_role, current_leader, logs
         
         success = False
         if current_role != "leader":
@@ -370,11 +370,11 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         
         key = request.key
         value = None
-        # dump_state(f"Node {node_id} (leader) received an GET request.")
+        dump_state(f"Node {node_id} (leader) received a GET request.")
 
-        for entry in reversed(self.logs):
-            if entry['key'] == key:
-                value = entry['value']
+        for entry in reversed(logs):
+            if entry.key == key:
+                value = entry.value
                 success = True
                 break
 
