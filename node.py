@@ -174,6 +174,7 @@ class NodeClient:
         global node_id, election_timeout, election_timer_event, election_timer_thread
 
         load_state(nodeId)
+        save_state(nodeId)
         node_id = nodeId
         election_timer_event = threading.Event()
         election_timer_thread = threading.Thread(target=self.start_election_timer)
@@ -196,6 +197,7 @@ class NodeClient:
 
         dump_state(f"Node {node_id} election timer timed out, Starting election.")
         current_term += 1
+        save_state(node_id)
         current_role = 'candidate'
         voted_for = node_id
         self.votes_received = {node_id}
@@ -251,6 +253,7 @@ class NodeClient:
             current_role = 'follower'
             print("collect_vote 3:", current_role)
             voted_for = None
+            save_state(node_id)
             reset_election_timeout()
     
     def start_heartbeat(self):
