@@ -29,6 +29,7 @@ current_term = 0
 voted_for = None
 logs = []
 commit_length = 0
+applied_length = 0
 current_role = 'follower'
 current_leader = None
 election_timeout = None
@@ -103,7 +104,7 @@ def dump_state(message):
         print(f"An error occurred while dumping the state")
 
 def save_state(node_id):
-    global logs, commit_length, voted_for, current_term
+    global logs, commit_length, applied_length, voted_for, current_term
 
     print(f"save_state called with node_id: {node_id}")
     directory = f'logs_node_{node_id}'
@@ -119,13 +120,13 @@ def save_state(node_id):
                     f.write(f'{log.command} {log.key} {log.value} {log.term}\n')
         
         with open(f'{directory}/metadata.txt', 'w') as f:
-            f.write(f'Commit Length: {commit_length}, Term: {current_term}, Voted for: {voted_for}\n')
+            f.write(f'Commit Length: {commit_length}, Applied Length: {applied_length}, Term: {current_term}, Voted for: {voted_for}\n')
 
     except Exception as e:
         print(f"An error occurred while saving the state")
 
 def load_state(node_id):
-    global logs, commit_length, voted_for, current_term
+    global logs, commit_length, applied_length, voted_for, current_term
 
     print(f"load_state called with node_id: {node_id}")
     directory = f'logs_node_{node_id}'
@@ -146,8 +147,9 @@ def load_state(node_id):
         with open(f'{directory}/metadata.txt', 'r') as f:
             metadata = f.read().split(',')
             commit_length = int(metadata[0].split(':')[1].strip())
-            current_term = int(metadata[1].split(':')[1].strip())
-            voted_for = metadata[2].split(':')[1].strip().lower() == 'True'
+            applied_length = int(metadata[1].split(':')[1].strip())
+            current_term = int(metadata[2].split(':')[1].strip())
+            voted_for = metadata[3].split(':')[1].strip().lower() == 'True'
     
     except Exception as e:
         print(f"An error occurred while loading the state")
@@ -197,7 +199,7 @@ def process_log_response(self, follower, term, ack, success, acks):
         # apply committed entries to the state machine
 
 def commit_log_entries(self):
-    global logs, commit_length, current_term, node_id
+    global logs, commit_length, applied_length, current_term, node_id
 
     min_acks = len(server_stubs) // 2
     print("commit log entries 1")
@@ -213,6 +215,7 @@ def commit_log_entries(self):
             print(logs[i], end=' ')
             dump_state(f"Node {node_id} (leader) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
         commit_length = ready[-1] + 1
+        applied_length = commit_length
         print("commitlength 2-",commit_length)
         save_state(node_id)
             
@@ -423,7 +426,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         return node_pb2.VoteResponse(voter_id=node_id, term=current_term, vote_granted=vote_granted, old_leader_lease_duration=lease_timeout)
     
     def append_entries(self, prefix_len, leader_commit, suffix):
-        global logs, commit_length, current_leader
+        global logs, commit_length, applied_length, current_leader
 
         print("append_entries")
         if len(suffix) > 0 and len(logs) > prefix_len:
@@ -440,6 +443,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
                 print(logs[i], end = " ")
                 dump_state(f"Node {node_id} (follower) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
             commit_length = leader_commit
+            applied_length = commit_length
         save_state(node_id)
             
     def Log(self, request, context):
