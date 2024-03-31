@@ -10,6 +10,7 @@ message VoteResponse {
   int32 voter_id = 1;
   int32 term = 2;
   bool vote_granted = 3;
+  float old_leader_lease_duration = 4;
 }
 
 message LogRequest{
@@ -27,6 +28,7 @@ message LogRequest{
   int32 leaderCommit = 5;
   repeated LogItem suffix = 6;
   int32 follower_id = 7;
+  float leader_lease = 8;
 }
 message LogResponse{
   int32 node_id = 1;
