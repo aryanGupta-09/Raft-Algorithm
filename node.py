@@ -12,9 +12,7 @@ from concurrent import futures
 ELECTION_TIMEOUT_MIN = 5  # Minimum election timeout in seconds
 ELECTION_TIMEOUT_MAX = 10  # Maximum election timeout in seconds
 HEARTBEAT_INTERVAL = 1  # Heartbeat interval in seconds
-
-heartbeat_lock = threading.Lock()
-setVal_lock = threading.Lock()
+LEASE_DURATION = 4  # Lease duration in seconds
 
 server_stubs = {
     0: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50051")),
@@ -23,6 +21,9 @@ server_stubs = {
     3: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50054")),
     4: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50055"))
 }
+
+heartbeat_lock = threading.Lock()
+setVal_lock = threading.Lock()
 
 node_id = None
 current_term = 0
@@ -36,13 +37,57 @@ election_timer_event = None
 election_timer_thread = None
 sent_length = defaultdict(lambda: 0)
 acked_length = defaultdict(lambda: 0)
-channel = None
+lease_timeout = 0
+lease_timer_event = threading.Event()
+lease_timer_thread = None
 
 def generate_election_timeout():
     return random.uniform(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
 
 def reset_election_timeout():
     election_timer_event.set()
+
+lease_flag = None
+
+def start_leader_lease_timer():
+    global current_role, lease_flag
+
+    print(f"start_lease_timer: leader_lease_remaining: {lease_timeout}")
+    while current_role == 'leader':
+        lease_timer_event.wait(lease_timeout)
+        
+        if lease_flag == "reset":
+            lease_timer_event.clear()
+            lease_flag = None
+            continue
+        
+        elif lease_flag == "stop":
+            lease_flag = None
+            break
+        else:
+            current_role = 'follower'
+            break
+    
+def reset_leader_lease_timeout():
+    global lease_timeout, lease_flag, lease_timer_event
+    lease_timeout = LEASE_DURATION
+    lease_flag = "reset"
+    lease_timer_event.set()
+
+def start_lease_timer(flag):
+    if flag == "leader":
+        start_leader_lease_timer()
+    else:
+        start_follower_lease_timer()
+
+def start_lease_timer_with_flag(flag):
+    global lease_timer_event, lease_timer_thread, lease_flag
+    lease_timer_event = threading.Event()
+    if lease_timer_thread is not None and lease_timer_thread.is_alive():
+        lease_flag = "stop"
+        lease_timer_event.set()
+    lease_timer_thread = threading.Thread(target=start_lease_timer, args=(flag,))
+    lease_timer_thread.start()
 
 def dump_state(message):
     global node_id
@@ -69,7 +114,10 @@ def save_state(node_id):
     try:
         with open(f'{directory}/logs.txt', 'w') as f:
             for log in logs:
-                f.write(f'{log.command} {log.key} {log.value} {log.term}\n')
+                if log.command == 'NO-OP':
+                    f.write(f'{log.command} {log.term}\n')
+                else:
+                    f.write(f'{log.command} {log.key} {log.value} {log.term}\n')
         
         with open(f'{directory}/metadata.txt', 'w') as f:
             f.write(f'Commit Length: {commit_length}, Term: {current_term}, Voted for: {voted_for}\n')
@@ -88,7 +136,13 @@ def load_state(node_id):
     
     try:
         with open(f'{directory}/logs.txt', 'r') as f:
-            logs = [node_pb2.LogRequest.LogItem(command=line.split()[0], key=line.split()[1], value=line.split()[2], term=int(line.split()[3])) for line in f.readlines()]
+            for line in f.readlines():
+                line = line.split()
+
+                if line[0] == "NO-OP":
+                    logs.append(node_pb2.LogRequest.LogItem(command=line[0], key="", value="", term=int(line[1])))
+                else:
+                    logs.append(node_pb2.LogRequest.LogItem(command=line[0], key=line[1], value=line[2], term=int(line[3])))
         
         with open(f'{directory}/metadata.txt', 'r') as f:
             metadata = f.read().split(',')
@@ -99,10 +153,10 @@ def load_state(node_id):
     except Exception as e:
         print(f"An error occurred while loading the state")
 
-def replicate_log(self, follower_id):
-    global logs, node_id, current_term, commit_length,server_stubs, sent_length, acked_length
+def replicate_log(self, follower_id, acks):
+    global logs, node_id, current_term, commit_length
 
-    print("replicate_log:", follower_id)
+    print("replicateLog1:", follower_id)
     prefixLen = sent_length[follower_id]
     suffix = logs[prefixLen:]
     prefixTerm = 0
@@ -112,18 +166,18 @@ def replicate_log(self, follower_id):
 
     request = node_pb2.LogRequest(leader_id=node_id, term=current_term, prefixLen=prefixLen,
                                     prefixTerm=prefixTerm, leaderCommit=commit_length,
-                                    suffix=suffix, follower_id=follower_id)
+                                    suffix=suffix, follower_id=follower_id, leader_lease = lease_timeout)
     try:
         stub = server_stubs[follower_id]
         response = stub.Log(request)
-        print("replicate_log 2-",follower_id)
-        process_log_response(self, follower_id, response.term, response.ack, response.success)
+        print("replicateLog2:",follower_id)
+        process_log_response(self, follower_id, response.term, response.ack, response.success, acks)
 
     except grpc.RpcError as e:
         dump_state(f"Error occurred while sending RPC to Node {follower_id}.")
-        print(f"Failed to connect to node {follower_id}")
+        print(f"Failed connection - {follower_id}")
 
-def process_log_response(self, follower, term, ack, success):
+def process_log_response(self, follower, term, ack, success, acks):
     global current_term, commit_length, current_role, voted_for
 
     print("process_log_response-",follower)
@@ -134,6 +188,7 @@ def process_log_response(self, follower, term, ack, success):
             commit_log_entries(self)
         elif sent_length[follower] > 0:
             sent_length[follower] -= 1
+        acks[0] += 1
 
     elif term > current_term:
         current_term = term
@@ -165,7 +220,7 @@ def commit_log_entries(self):
 
 class NodeClient:
     def __init__(self, nodeId):
-        global node_id, election_timeout, election_timer_event, election_timer_thread
+        global node_id, election_timeout, election_timer_event, election_timer_thread, lease_timer_event, lease_timer_thread
 
         load_state(nodeId)
         save_state(nodeId)
@@ -173,6 +228,7 @@ class NodeClient:
         election_timer_event = threading.Event()
         election_timer_thread = threading.Thread(target=self.start_election_timer)
         election_timer_thread.start()
+
         self.votes_received = set()
             
     def start_election_timer(self):
@@ -189,7 +245,7 @@ class NodeClient:
     def start_election(self):
         global current_leader, current_role, voted_for, current_term, node_id, logs
 
-        dump_state(f"Node {node_id} election timer timed out, Starting election.")
+        dump_state(f"Node {node_id} election timeout-> Starting election.")
         current_term += 1
         save_state(node_id)
         current_role = 'candidate'
@@ -204,13 +260,14 @@ class NodeClient:
                 break
 
             if nodeId != node_id:
-                print("start_election 2:", nodeId, current_term)
+                print(f"{current_term} start_election2:{nodeId}")
                 thread = threading.Thread(target=self.request_vote, args=(nodeId, current_term, len(logs), last_term))
                 threads.append(thread)
                 thread.start()
+                thread.join()
         # wait for all threads to complete
-        for thread in threads:
-            thread.join()
+        # for thread in threads:
+        #     thread.join()
     
     def request_vote(self, nodeId, current_term, log_length, last_term):
         try:
@@ -224,22 +281,33 @@ class NodeClient:
             dump_state(f"Error occurred while sending RPC to Node {nodeId}.")
     
     def collect_vote(self, response):
-        global current_role, node_id, current_term, logs, voted_for, current_leader
+        global current_role, node_id, current_term, logs, voted_for, current_leader, lease_timeout
 
-        print("collect_vote 1:", response.vote_granted)
+        print(f"{response.voter_id} collectVote1:{response.vote_granted}")
         if current_role == 'candidate' and response.term == current_term and response.vote_granted:
             self.votes_received.add(response.voter_id)
+            lease_timeout = max(lease_timeout, response.old_leader_lease_duration) # lease_timeout first becomes equal to the max old leader lease's remaining duration
+            print(f"{response.voter_id} collectVote1: recieving {response.old_leader_lease_duration} ")
 
-            if len(self.votes_received) >= (len(server_stubs) + 1) // 2:
+            if len(self.votes_received) >= len(server_stubs) // 2 + 1:
                 current_role = 'leader'
                 dump_state(f"Node {node_id} became the leader for term {current_term}")
-                print(f"collect_vote 2: Node {node_id} became the leader for ", current_role)
+                print(f"collectVote 2: Node {node_id} became the LEADER for term {current_term}")
                 current_leader = node_id
                 reset_election_timeout()
                 for follower_id in server_stubs.keys():
                     if follower_id != node_id:
                         sent_length[follower_id] = len(logs)
                         acked_length[follower_id] = 0
+                
+                print(f"Leader Sleeping for {lease_timeout} seconds")
+                dump_state(f"New Leader waiting for Old Leader Lease to timeout.")
+                time.sleep(lease_timeout)
+                lease_timeout = LEASE_DURATION
+                
+                noopLog = node_pb2.LogRequest.LogItem(command = "NO-OP", key = "", value = "", term = current_term)
+                logs.append(noopLog)
+                start_lease_timer_with_flag("leader")
                 self.start_heartbeat()
 
         elif response.term > current_term:
@@ -251,49 +319,109 @@ class NodeClient:
             reset_election_timeout()
     
     def start_heartbeat(self):
-        global current_role, node_id
+        global current_role, node_id, lease_timeout
 
+        start_time = time.time()
+        renew_fail = False
         while current_role == 'leader':
-            time.sleep(HEARTBEAT_INTERVAL)
             reset_election_timeout()
             print("start_heartbeat")
 
+            if lease_timeout <= 0:
+                print(f"Node {node_id}'s leader lease expired.")
+                break
+
             with heartbeat_lock:
+                dump_state(f"Leader {node_id} sending heartbeat & Renewing Lease")
                 threads = []
+                acks = [0]
+                elapsed_time = time.time() - start_time
+                lease_timeout = max(0, lease_timeout - elapsed_time)
+                print(f"start_heartbeat lease_timeout: {lease_timeout}")
+               
                 for follower_id in server_stubs.keys():
                     if follower_id != node_id:
-                        thread = threading.Thread(target=replicate_log, args=(self, follower_id,))
+                        thread = threading.Thread(target=replicate_log, args=(self, follower_id, acks))
                         threads.append(thread)
                         thread.start()
+                        thread.join()
                 # wait for all threads to complete
-                for thread in threads:
-                    thread.join()
-        else:
-            dump_state(f"{node_id} Stepping down")
+                # for thread in threads:
+                #     thread.join()
+                
+                if acks[0] >= len(server_stubs) // 2:
+                    print(f"Leader {node_id} lease renewed for {lease_timeout} seconds.")
+                    reset_leader_lease_timeout()
+                    renew_fail = False
+                else:
+                    renew_fail = True
 
+                start_time = time.time()
+                time.sleep(HEARTBEAT_INTERVAL)
+        else:
+            if renew_fail:
+                dump_state(f"Leader {node_id} lease renewal failed. Stepping Down.")
+            else:
+                dump_state(f"{node_id} Stepping down")
+
+
+leader_lease_start_time = None
+
+def start_follower_lease_timer():
+    global lease_flag, leader_lease_start_time, current_role
+    print(f"start_leader_lease_timer: leader_lease_remaining: {lease_timeout}")
+    while current_role == "follower":
+        leader_lease_start_time = time.time()
+        lease_timer_event.wait(lease_timeout)
+
+        if lease_flag == "reset":
+            lease_timer_event.clear()
+            lease_flag = None
+            continue
+                
+        elif lease_flag == "stop":
+            lease_flag = None
+            leader_lease_start_time = None
+            break
+
+        current_role = 'follower'
+        break
+
+def reset_follower_lease_timeout():
+    global lease_flag
+    lease_flag = "reset"
+    lease_timer_event.set()
 
 class NodeServer(node_pb2_grpc.NodeServicer):
 
     def Vote(self, request, context):
-        global current_term, current_role, voted_for, logs, node_id
+        global current_term, current_role, voted_for, logs, node_id, leader_lease_start_time, lease_timeout, lease_flag
         
         reset_election_timeout()
         if request.term > current_term:
             current_term = request.term
             current_role = 'follower'
+            lease_flag = "stop"
+            lease_timer_event.set()
             voted_for = None
 
         last_log_term = 0 if not logs else logs[-1].term
         log_ok = request.last_term > last_log_term or (request.last_term == last_log_term and request.log_length >= len(logs))
         vote_granted = False
-        print(f"Vote 1: term: {request.term}, current_term: {current_term}, voted_for: {voted_for}, candidate_id: {request.candidate_id}")
         
         if request.term == current_term and log_ok and (voted_for is None or voted_for == request.candidate_id):
             voted_for = request.candidate_id
             vote_granted = True
+
+        print(f"Vote: term: {request.term}, current_term: {current_term}, voted_for: {voted_for}, candidate_id: {request.candidate_id}, vote_granted: {vote_granted}")
         
         dump_state(f"Vote {'granted' if vote_granted else 'denied'} for Node {request.candidate_id} in term {current_term}")
-        return node_pb2.VoteResponse(voter_id=node_id, term=current_term, vote_granted=vote_granted)
+        if leader_lease_start_time is not None:
+            leader_lease_elapsed_time = time.time() - leader_lease_start_time
+            lease_timeout = max(0, lease_timeout - leader_lease_elapsed_time)
+            print(f"leader_lease_timeout: {lease_timeout}, leader_lease_start_time: {leader_lease_start_time}, leader_lease_elapsed_time: {leader_lease_elapsed_time}")
+            
+        return node_pb2.VoteResponse(voter_id=node_id, term=current_term, vote_granted=vote_granted, old_leader_lease_duration=lease_timeout)
     
     def append_entries(self, prefix_len, leader_commit, suffix):
         global logs, commit_length, current_leader
@@ -316,7 +444,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         save_state(node_id)
             
     def Log(self, request, context):
-            global current_term, current_role, current_leader, voted_for, logs, commit_length, node_id
+            global current_term, current_role, current_leader, voted_for, logs, commit_length, node_id, lease_timeout, lease_flag
 
             if request.term >= current_term:
                 if request.term > current_term:
@@ -325,7 +453,13 @@ class NodeServer(node_pb2_grpc.NodeServicer):
                 current_term = request.term
                 current_role = 'follower'
                 current_leader = request.leader_id
+                lease_timeout = request.leader_lease
+                reset_follower_lease_timeout()
                 reset_election_timeout()
+                
+            for s in request.suffix:
+                if s.command == "NO-OP":
+                    start_lease_timer_with_flag("follower")
 
             log_ok = len(logs) >= request.prefixLen and (request.prefixLen == 0 or logs[request.prefixLen - 1].term == request.prefixTerm)
             if request.term == current_term and log_ok:
@@ -372,12 +506,13 @@ class NodeServer(node_pb2_grpc.NodeServicer):
                 threads = []
                 for follower_id in server_stubs.keys():
                     if follower_id != node_id:
-                        thread = threading.Thread(target=replicate_log, args=(self, follower_id,))
+                        thread = threading.Thread(target=replicate_log, args=(self, follower_id, [0]))
                         threads.append(thread)
                         thread.start()
+                        thread.join()
                 # wait for all threads to complete
-                for thread in threads:
-                    thread.join()
+                # for thread in threads:
+                #     thread.join()
             
             attempt += 1
         else:
