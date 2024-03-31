@@ -22,8 +22,7 @@ server_stubs = {
     4: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50055"))
 }
 
-heartbeat_lock = threading.Lock()
-setVal_lock = threading.Lock()
+replicate_log_lock = threading.Lock()
 
 node_id = None
 current_term = 0
@@ -331,7 +330,7 @@ class NodeClient:
                 print(f"Node {node_id}'s leader lease expired.")
                 break
 
-            with heartbeat_lock:
+            with replicate_log_lock:
                 dump_state(f"Leader {node_id} sending heartbeat & Renewing Lease")
                 threads = []
                 acks = [0]
@@ -502,7 +501,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
             
             reset_election_timeout()
 
-            with setVal_lock:
+            with replicate_log_lock:
                 threads = []
                 for follower_id in server_stubs.keys():
                     if follower_id != node_id:
