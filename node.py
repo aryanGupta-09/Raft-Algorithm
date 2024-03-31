@@ -228,6 +228,7 @@ class NodeClient:
 
         except grpc.RpcError as e:
             print(f"Failed to connect to node {nodeId}")
+            dump_state(f"Error occurred while sending RPC to Node {nodeId}.")
     
     def collect_vote(self, response):
         global current_role, node_id, current_term, logs, voted_for, current_leader
@@ -317,7 +318,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
         if leader_commit > commit_length:
             for i in range(commit_length, leader_commit):
                 print(logs[i], end = " ")
-                dump_state(f"Node {node_id} (leader) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
+                dump_state(f"Node {node_id} (follower) committed the entry {logs[i].command} {logs[i].key} {logs[i].value} to the state machine.")
             commit_length = leader_commit
         save_state(node_id)
             
