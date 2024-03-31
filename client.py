@@ -13,20 +13,17 @@ class RaftClient:
             3: "localhost:50054",
             4: "localhost:50055"
         }
-
-    def get_stub(self, node_id):
-        self.channel = grpc.insecure_channel(self.server_adds[node_id])
-        return node_pb2_grpc.NodeStub(self.channel)
     
     def set_val(self, key, value):
         try:
-            stub = self.get_stub(self.leader_id)
-            request = node_pb2.SetValRequest(key=key, value=value)
-            response = stub.SetVal(request)
-            print(f"Set result: {response.current_leader} {response.success}")
-            if self.leader_id != response.current_leader:
-                self.leader_id = response.current_leader
-                self.set_val(key, value)
+            with grpc.insecure_channel(self.server_adds[self.leader_id]) as channel:
+                stub = node_pb2_grpc.NodeStub(channel)
+                request = node_pb2.SetValRequest(key=key, value=value)
+                response = stub.SetVal(request)
+                print(f"Set result: {response.current_leader} {response.success}")
+                if self.leader_id != response.current_leader:
+                    self.leader_id = response.current_leader
+                    self.set_val(key, value)
 
         except grpc.RpcError:
             print("Leader server is unavailable.")
@@ -35,13 +32,14 @@ class RaftClient:
 
     def get_val(self, key):
         try:
-            stub = self.get_stub(self.leader_id)
-            request = node_pb2.GetValRequest(key=key)
-            response = stub.GetVal(request)
-            print(f"Get result: {response.value}")
-            if self.leader_id != response.current_leader:
-                self.leader_id = response.current_leader
-                self.get_val(key)
+            with grpc.insecure_channel(self.server_adds[self.leader_id]) as channel:
+                stub = node_pb2_grpc.NodeStub(channel)
+                request = node_pb2.GetValRequest(key=key)
+                response = stub.GetVal(request)
+                print(f"Get result: {response.value}")
+                if self.leader_id != response.current_leader:
+                    self.leader_id = response.current_leader
+                    self.get_val(key)
                 
         except grpc.RpcError:
             print("Leader server is unavailable.")

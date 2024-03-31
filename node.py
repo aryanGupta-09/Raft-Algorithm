@@ -16,12 +16,12 @@ HEARTBEAT_INTERVAL = 1  # Heartbeat interval in seconds
 heartbeat_lock = threading.Lock()
 setVal_lock = threading.Lock()
 
-server_adds = {
-    0: "localhost:50051",
-    1: "localhost:50052",
-    2: "localhost:50053",
-    3: "localhost:50054",
-    4: "localhost:50055"
+server_stubs = {
+    0: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50051")),
+    1: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50052")),
+    2: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50053")),
+    3: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50054")),
+    4: node_pb2_grpc.NodeStub(grpc.insecure_channel("localhost:50055"))
 }
 
 node_id = None
@@ -37,11 +37,6 @@ election_timer_thread = None
 sent_length = defaultdict(lambda: 0)
 acked_length = defaultdict(lambda: 0)
 channel = None
-
-def get_stub(node_id):
-    global channel
-    channel = grpc.insecure_channel(server_adds[node_id])
-    return node_pb2_grpc.NodeStub(channel)
 
 def generate_election_timeout():
     return random.uniform(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
@@ -105,7 +100,7 @@ def load_state(node_id):
         print(f"An error occurred while loading the state")
 
 def replicate_log(self, follower_id):
-    global logs, node_id, current_term, commit_length
+    global logs, node_id, current_term, commit_length,server_stubs, sent_length, acked_length
 
     print("replicate_log:", follower_id)
     prefixLen = sent_length[follower_id]
@@ -119,9 +114,8 @@ def replicate_log(self, follower_id):
                                     prefixTerm=prefixTerm, leaderCommit=commit_length,
                                     suffix=suffix, follower_id=follower_id)
     try:
-        stub = get_stub(follower_id)
+        stub = server_stubs[follower_id]
         response = stub.Log(request)
-        channel.close()
         print("replicate_log 2-",follower_id)
         process_log_response(self, follower_id, response.term, response.ack, response.success)
 
@@ -151,12 +145,12 @@ def process_log_response(self, follower, term, ack, success):
 def commit_log_entries(self):
     global logs, commit_length, current_term, node_id
 
-    min_acks = len(server_adds) // 2
+    min_acks = len(server_stubs) // 2
     print("commit log entries 1")
     ready = []
 
     for i in range(len(logs)):
-        acked_nodes = [n for n in server_adds.keys() if n != node_id and acked_length[n] >= i]
+        acked_nodes = [n for n in server_stubs.keys() if n != node_id and acked_length[n] >= i]
         if len(acked_nodes) >= min_acks:
             ready.append(i)
     
@@ -204,7 +198,7 @@ class NodeClient:
         last_term = 0 if not logs else logs[-1].term
         threads = []
 
-        for nodeId in server_adds.keys():
+        for nodeId in server_stubs.keys():
             print("start_election 1:", current_role)
             if current_role != 'candidate':
                 break
@@ -221,9 +215,8 @@ class NodeClient:
     def request_vote(self, nodeId, current_term, log_length, last_term):
         try:
             request = node_pb2.VoteRequest(candidate_id=node_id, term=current_term, log_length=log_length, last_term=last_term)
-            stub = get_stub(nodeId)
+            stub = server_stubs[nodeId]
             response = stub.Vote(request)
-            channel.close()
             self.collect_vote(response)
 
         except grpc.RpcError as e:
@@ -236,13 +229,13 @@ class NodeClient:
         if current_role == 'candidate' and response.term == current_term and response.vote_granted:
             self.votes_received.add(response.voter_id)
 
-            if len(self.votes_received) >= (len(server_adds) + 1) // 2:
+            if len(self.votes_received) >= (len(server_stubs) + 1) // 2:
                 current_role = 'leader'
                 dump_state(f"Node {node_id} became the leader for term {current_term}")
                 print(f"collect_vote 2: Node {node_id} became the leader for ", current_role)
                 current_leader = node_id
                 reset_election_timeout()
-                for follower_id in server_adds.keys():
+                for follower_id in server_stubs.keys():
                     if follower_id != node_id:
                         sent_length[follower_id] = len(logs)
                         acked_length[follower_id] = 0
@@ -266,7 +259,7 @@ class NodeClient:
 
             with heartbeat_lock:
                 threads = []
-                for follower_id in server_adds.keys():
+                for follower_id in server_stubs.keys():
                     if follower_id != node_id:
                         thread = threading.Thread(target=replicate_log, args=(self, follower_id,))
                         threads.append(thread)
@@ -376,7 +369,7 @@ class NodeServer(node_pb2_grpc.NodeServicer):
 
             with setVal_lock:
                 threads = []
-                for follower_id in server_adds.keys():
+                for follower_id in server_stubs.keys():
                     if follower_id != node_id:
                         thread = threading.Thread(target=replicate_log, args=(self, follower_id,))
                         threads.append(thread)
