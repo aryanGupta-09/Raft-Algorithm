@@ -1,5 +1,5 @@
 # Raft-Algorithm
-Crafting a robust distributed consensus system on Google Cloud, integrating the Raft algorithm with gRPC communication and leader lease mechanism. This project showcases the efficiency and reliability of distributed systems while ensuring seamless coordination and fault tolerance across nodes.
+A robust distributed consensus system on Google Cloud, integrating the Raft algorithm with gRPC communication and leader lease mechanism. This project showcases the efficiency and reliability of distributed systems while ensuring seamless coordination and fault tolerance across nodes.
 
 ## Tech Stack
 
